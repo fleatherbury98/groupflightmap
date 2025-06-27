@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Group Flight Routes Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    #map { height: 100vh; }
+    #legend {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      background: white;
+      padding: 10px;
+      border-radius: 8px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.2);
+      font-family: sans-serif;
+      font-size: 14px;
+      z-index: 1000;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+    .legend-color {
+      width: 14px;
+      height: 14px;
+      margin-right: 8px;
+      border-radius: 3px;
+    }
+    .collapsible-section {
+      max-height: 150px;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+      padding: 5px;
+      border-radius: 5px;
+      margin-bottom: 10px;
+    }
+    .collapsible-toggle {
+      cursor: pointer;
+      font-weight: bold;
+      margin: 5px 0;
+      display: block;
+    }
+    .search-box {
+      width: 100%;
+      margin-bottom: 5px;
+    }
+    button {
+      margin-right: 5px;
+    }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div id="legend">
+  <strong>Filter by Flyer</strong><br/>
+  <div id="flyer-filters"></div>
+
+  <span class="collapsible-toggle" onclick="toggleSection('class-filters')">Filter by Aircraft Class</span>
+  <div style="margin-bottom: 5px">
+    <button onclick="toggleAll('class-filters', true)">All</button>
+    <button onclick="toggleAll('class-filters', false)">None</button>
+  </div>
+  <div id="class-filters" class="collapsible-section"></div>
+
+  <span class="collapsible-toggle" onclick="toggleSection('airline-filters')">Filter by Airline</span>
+  <input class="search-box" onkeyup="filterList('airline-filters', this.value)" placeholder="Search airlines...">
+  <div style="margin-bottom: 5px">
+    <button onclick="toggleAll('airline-filters', true)">All</button>
+    <button onclick="toggleAll('airline-filters', false)">None</button>
+  </div>
+  <div id="airline-filters" class="collapsible-section"></div>
+
+  <span class="collapsible-toggle" onclick="toggleSection('airport-filters')">Filter by Airport</span>
+  <input class="search-box" onkeyup="filterList('airport-filters', this.value)" placeholder="Search airports...">
+  <div style="margin-bottom: 5px">
+    <button onclick="toggleAll('airport-filters', true)">All</button>
+    <button onclick="toggleAll('airport-filters', false)">None</button>
+  </div>
+  <div id="airport-filters" class="collapsible-section"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/leaflet.geodesic@2.7.1/dist/leaflet.geodesic.umd.min.js"></script>
+<script>
+const sheetUrl = "https://script.google.com/macros/s/AKfycbxkb3PCR-nQMoOUotF8IKGGhwyf3G8wTsv5s-L4aCsyM86wJPLMO9P_woQyxvD0pqK3/exec";
+
+const map = L.map('map').setView([20, 0], 2);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 10,
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+const colorMap = {
+  "Freddie": "red",
+  "Ryan": "green",
+  "Nolan": "blue",
+  "Ruben": "purple",
+  "Joey": "orange",
+  "Jake": "teal",
+  "Ethan": "black"
+};
+
+const flyerLayers = {}, classLayers = {}, airlineLayers = {}, airportLayers = {};
+const activeFlyers = new Set(), activeClasses = new Set(), activeAirlines = new Set(), activeAirports = new Set();
+const routeMap = new Map();
+const icaoToIata = {};
+
+function toggleSection(id) {
+  const section = document.getElementById(id);
+  if (section) section.style.display = section.style.display === "none" ? "block" : "none";
+}
+function toggleAll(sectionId, checked) {
+  const checkboxes = document.getElementById(sectionId).querySelectorAll('input[type=checkbox]');
+  checkboxes.forEach(cb => {
+    if (cb.checked !== checked) {
+      cb.checked = checked;
+      cb.dispatchEvent(new Event('change'));
+    }
+  });
+}
+function filterList(containerId, query) {
+  const list = document.getElementById(containerId);
+  const lower = query.toLowerCase();
+  list.querySelectorAll('.legend-item').forEach(item => {
+    item.style.display = item.textContent.toLowerCase().includes(lower) ? '' : 'none';
+  });
+}
+
+fetch(sheetUrl).then(r => r.json()).then(data => {
+  data.forEach(row => {
+    const flyer = row["Flyer"];
+    const origin = row["Origin"];
+    const destination = row["Destination"];
+    const iataOrigin = row["Origin IATA"] || origin.slice(1);  // fallback simple
+    const iataDest = row["Destination IATA"] || destination.slice(1);
+    const reg = row["Registration"];
+    const flight = row["Flight Number"];
+    const airline = row["Airline"];
+    const aircraftType = row["Aircraft Type"];
+    const aircraftClass = row["Aircraft Class"];
+    const date = new Date(row["Date"]);
+    const lat1 = parseFloat(row["Origin Latitude"]);
+    const lon1 = parseFloat(row["Origin Longitude"]);
+    const lat2 = parseFloat(row["Destination Latitude"]);
+    const lon2 = parseFloat(row["Destination Longitude"]);
+    if (!origin || !destination || isNaN(lat1) || isNaN(lat2)) return;
+
+    const key = [origin, destination].sort().join("|");
+    if (!routeMap.has(key)) {
+      routeMap.set(key, {
+        coords: [[lat1, lon1], [lat2, lon2]],
+        flights: []
+      });
+    }
+    routeMap.get(key).flights.push({ flyer, flight, origin, destination, iataOrigin, iataDest, airline, aircraftType, aircraftClass, date, reg });
+
+    activeFlyers.add(flyer);
+    activeAirlines.add(airline);
+    activeClasses.add(aircraftClass);
+    activeAirports.add(origin);
+    activeAirports.add(destination);
+  });
+
+  const flyerDiv = document.getElementById("flyer-filters");
+  [...activeFlyers].sort().forEach(name => {
+    const el = document.createElement("div");
+    el.classList.add("legend-item");
+    el.innerHTML = `<input type='checkbox' data-flyer='${name}' checked> <div class='legend-color' style='background:${colorMap[name] || "gray"}'></div>${name}`;
+    flyerDiv.appendChild(el);
+  });
+  const classDiv = document.getElementById("class-filters");
+  [...activeClasses].sort().forEach(c => {
+    const el = document.createElement("div");
+    el.classList.add("legend-item");
+    el.innerHTML = `<input type='checkbox' data-class='${c}' checked> ${c}`;
+    classDiv.appendChild(el);
+  });
+  const airlineDiv = document.getElementById("airline-filters");
+  [...activeAirlines].sort().forEach(a => {
+    const el = document.createElement("div");
+    el.classList.add("legend-item");
+    el.innerHTML = `<input type='checkbox' data-airline='${a}' checked> ${a}`;
+    airlineDiv.appendChild(el);
+  });
+  const airportDiv = document.getElementById("airport-filters");
+  [...activeAirports].sort().forEach(code => {
+    const iata = code.slice(1); // rough fallback
+    const label = `${iata}(${code})`;
+    const el = document.createElement("div");
+    el.classList.add("legend-item");
+    el.innerHTML = `<input type='checkbox' data-airport='${code}' checked> ${label}`;
+    airportDiv.appendChild(el);
+  });
+
+  const updateMap = () => {
+    map.eachLayer(layer => { if (layer instanceof L.Geodesic) map.removeLayer(layer); });
+
+    const selectedFlyers = new Set([...document.querySelectorAll('[data-flyer]:checked')].map(cb => cb.getAttribute('data-flyer')));
+    const selectedClasses = new Set([...document.querySelectorAll('[data-class]:checked')].map(cb => cb.getAttribute('data-class')));
+    const selectedAirlines = new Set([...document.querySelectorAll('[data-airline]:checked')].map(cb => cb.getAttribute('data-airline')));
+    const selectedAirports = new Set([...document.querySelectorAll('[data-airport]:checked')].map(cb => cb.getAttribute('data-airport')));
+
+    for (const [key, route] of routeMap.entries()) {
+      const validFlights = route.flights.filter(f =>
+        selectedFlyers.has(f.flyer) &&
+        selectedAirlines.has(f.airline) &&
+        selectedClasses.has(f.aircraftClass) &&
+        (selectedAirports.has(f.origin) || selectedAirports.has(f.destination))
+      );
+      if (validFlights.length === 0) continue;
+
+      const coords = route.coords;
+      const popup = validFlights.map(f =>
+        `<strong>${f.flyer}</strong><br/>Flight: ${f.flight}<br/>${f.iataOrigin}(${f.origin}) → ${f.iataDest}(${f.destination})<br/>Date: ${f.date.toLocaleDateString()}<br/>Aircraft: ${f.aircraftType} (${f.aircraftClass}), Reg: ${f.reg}`
+      ).join("<hr/>");
+
+      const line = new L.Geodesic([coords], {
+        color: colorMap[validFlights[0].flyer] || "gray",
+        weight: Math.min(1 + validFlights.length / 3, 10),
+        opacity: 0.75,
+        steps: 50
+      });
+      line.bindPopup(popup);
+      line.addTo(map);
+    }
+  };
+
+  document.querySelectorAll('#legend input[type=checkbox]').forEach(cb => cb.addEventListener('change', updateMap));
+  updateMap();
+});
+</script>
+</body>
+</html>
